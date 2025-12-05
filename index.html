@@ -3,8 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>لعبة التخمين والرسم</title>
+    <title>لعبة التخمين والرسم - غرف خاصة</title>
     
+    <!-- Favicon -->
+    <link rel="icon" type="image/png" href="https://pngimg.com/d/letter_s_PNG29.png">
+
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     
@@ -18,7 +21,7 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
-        import { getFirestore, collection, doc, setDoc, onSnapshot, updateDoc, arrayUnion, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+        import { getFirestore, collection, doc, setDoc, onSnapshot, updateDoc, arrayUnion, increment, serverTimestamp, deleteDoc } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
 
         // --- Firebase Configuration ---
         const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
@@ -34,14 +37,15 @@
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-gartic-app-v2';
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-gartic-app-v3-rooms';
 
         // --- Global State ---
         let currentUser = null;
+        let currentRoomCode = null; // New: Store current room code
         let roomData = null;
         let players = [];
         let messages = [];
-        let strokes = []; // {color, width, points: [{x, y}]}
+        let strokes = [];
         let isDrawing = false;
         let currentPoints = [];
         let currentColor = '#000000';
@@ -49,6 +53,11 @@
         let timeLeft = 0;
         let timerInterval = null;
         let isDrawer = false;
+        let heartbeatInterval = null;
+        let cleanupInterval = null;
+        let unsubscribeRoom = null;
+        let unsubscribePlayers = null;
+        let unsubscribeMessages = null;
 
         // --- DOM Elements ---
         const views = {
@@ -100,7 +109,6 @@
                 currentUser = user;
                 document.getElementById('loading-screen').classList.add('hidden');
                 switchView('login');
-                setupFirestoreListeners();
             }
         });
 
@@ -113,10 +121,45 @@
             }
         }
 
+        // --- Heartbeat & Cleanup Logic ---
+        function startHeartbeatSystem(roomCode) {
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
+            if (cleanupInterval) clearInterval(cleanupInterval);
+
+            // 1. Send Heartbeat (Update my lastActive)
+            heartbeatInterval = setInterval(async () => {
+                if (!currentUser || !roomCode) return;
+                try {
+                    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', `room_${roomCode}_players`, currentUser.uid), {
+                        lastActive: Date.now()
+                    });
+                } catch (e) { console.error("Heartbeat error", e); }
+            }, 5000); // Every 5 seconds
+
+            // 2. Cleanup Inactive Users (Check every 10 seconds)
+            cleanupInterval = setInterval(() => {
+                const now = Date.now();
+                players.forEach(async (p) => {
+                    // If player hasn't updated in 60 seconds, delete them
+                    if (now - (p.lastActive || 0) > 60000) {
+                        console.log(`Removing inactive player: ${p.name}`);
+                        try {
+                            await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', `room_${roomCode}_players`, p.id));
+                        } catch (e) { console.error("Cleanup error", e); }
+                    }
+                });
+            }, 10000);
+        }
+
         // --- Firestore Listeners ---
-        function setupFirestoreListeners() {
-            // Room Data
-            onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), (snap) => {
+        function setupFirestoreListeners(roomCode) {
+            // Unsubscribe previous listeners if any
+            if (unsubscribeRoom) unsubscribeRoom();
+            if (unsubscribePlayers) unsubscribePlayers();
+            if (unsubscribeMessages) unsubscribeMessages();
+
+            // 1. Room Data Listener
+            unsubscribeRoom = onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomCode), (snap) => {
                 if (snap.exists()) {
                     roomData = snap.data();
                     strokes = roomData.strokes || [];
@@ -133,47 +176,48 @@
                         timeLeft = left;
                         document.getElementById('timer-display').textContent = timeLeft + 's';
                         
-                        // Check if I should end the round
                         if (timeLeft === 0 && roomData.status === 'playing' && isDrawer) {
                             endRound();
                         }
                     }
 
-                    // Auto switch to game if playing
+                    // Auto switch views
                     if ((roomData.status === 'playing' || roomData.status === 'finished') && !views.game.classList.contains('hidden') === false) {
-                        if (players.find(p => p.id === currentUser.uid)) { // Only if joined
+                        if (players.find(p => p.id === currentUser.uid)) { 
                             switchView('game');
                         }
                     }
-                    // Back to lobby logic
                     if (roomData.status === 'lobby' && !views.lobby.classList.contains('hidden') === false) {
                          if (players.find(p => p.id === currentUser.uid)) {
                             switchView('lobby');
                          }
                     }
                 } else {
-                    // Create room if not exists
-                    setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
+                    // Create room if it doesn't exist
+                    setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', roomCode), {
                         status: 'lobby',
                         currentWord: '',
                         drawerId: null,
                         roundEndTime: null,
                         strokes: [],
-                        usedWords: []
+                        usedWords: [],
+                        createdAt: serverTimestamp()
                     });
                 }
             });
 
-            // Players
-            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'game_room_players'), (snap) => {
+            // 2. Players Listener
+            unsubscribePlayers = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', `room_${roomCode}_players`), (snap) => {
                 players = [];
                 snap.forEach(d => players.push({ id: d.id, ...d.data() }));
+                // Local filter for inactive users to make UI snappy
+                // players = players.filter(p => (Date.now() - (p.lastActive || Date.now())) < 65000);
                 players.sort((a, b) => b.score - a.score);
                 renderPlayers();
             });
 
-            // Messages
-            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'game_room_messages'), (snap) => {
+            // 3. Messages Listener
+            unsubscribeMessages = onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', `room_${roomCode}_messages`), (snap) => {
                 messages = [];
                 snap.forEach(d => messages.push({ id: d.id, ...d.data() }));
                 messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
@@ -184,22 +228,36 @@
         // --- Game Logic ---
         window.joinGame = async () => {
             const nameInput = document.getElementById('player-name');
+            const roomInput = document.getElementById('room-code');
             const name = nameInput.value.trim();
-            if (!name) return alert('الرجاء إدخال اسم!');
+            const code = roomInput.value.trim();
 
-            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_players', currentUser.uid), {
+            if (!name) return alert('الرجاء إدخال الاسم!');
+            if (!code) return alert('الرجاء إدخال رقم الغرفة!');
+
+            currentRoomCode = code;
+
+            // Update Header with Room Code
+            document.getElementById('room-display').innerText = `الغرفة: ${code}`;
+            document.getElementById('room-display').classList.remove('hidden');
+
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', `room_${code}_players`, currentUser.uid), {
                 name: name,
                 score: 0,
-                avatar: Math.floor(Math.random() * 5)
+                avatar: Math.floor(Math.random() * 5),
+                lastActive: Date.now()
             });
 
+            setupFirestoreListeners(code);
+            startHeartbeatSystem(code);
             switchView('lobby');
         };
 
         window.startGame = async () => {
+            if (!roomData) return; // Guard clause
             if (players.length < 2) {
-                // alert('نحتاج لاعبين اثنين على الأقل!');
-                // For testing allow 1
+                 // alert('نحتاج لاعبين اثنين على الأقل!');
+                 // Testing mode allowed
             }
 
             const randomPlayer = players[Math.floor(Math.random() * players.length)];
@@ -207,11 +265,11 @@
             let availableWords = WORD_LIST.filter(w => !roomData.usedWords?.includes(w));
             if (availableWords.length === 0) {
                 availableWords = WORD_LIST;
-                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), { usedWords: [] });
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoomCode), { usedWords: [] });
             }
             const newWord = availableWords[Math.floor(Math.random() * availableWords.length)];
 
-            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
+            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoomCode), {
                 status: 'playing',
                 drawerId: randomPlayer.id,
                 currentWord: newWord,
@@ -222,12 +280,12 @@
         };
 
         async function endRound() {
-            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
+            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoomCode), {
                 status: 'finished',
                 roundEndTime: Date.now() + 5000
             });
             setTimeout(async () => {
-                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoomCode), {
                     status: 'lobby',
                     currentWord: '',
                     drawerId: null
@@ -240,23 +298,23 @@
             e.preventDefault();
             const input = document.getElementById('chat-input');
             const text = input.value.trim();
-            if (!text) return;
+            if (!text || !roomData) return; // Added roomData check
 
             const isCorrect = roomData.status === 'playing' && !isDrawer && text === roomData.currentWord;
 
             if (isCorrect) {
                 // Score Logic
                 const points = 10 + Math.floor(timeLeft / 5);
-                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_players', currentUser.uid), {
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', `room_${currentRoomCode}_players`, currentUser.uid), {
                     score: increment(points)
                 });
                 if (roomData.drawerId) {
-                    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_players', roomData.drawerId), {
+                    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', `room_${currentRoomCode}_players`, roomData.drawerId), {
                         score: increment(5)
                     });
                 }
                 
-                await setDoc(doc(collection(db, 'artifacts', appId, 'public', 'data', 'game_room_messages')), {
+                await setDoc(doc(collection(db, 'artifacts', appId, 'public', 'data', `room_${currentRoomCode}_messages`)), {
                     text: `🎉 ${players.find(p => p.id === currentUser.uid)?.name} خمن الكلمة الصحيحة!`,
                     sender: 'System',
                     isSystem: true,
@@ -265,7 +323,7 @@
                 
                 endRound();
             } else {
-                await setDoc(doc(collection(db, 'artifacts', appId, 'public', 'data', 'game_room_messages')), {
+                await setDoc(doc(collection(db, 'artifacts', appId, 'public', 'data', `room_${currentRoomCode}_messages`)), {
                     text: text,
                     sender: players.find(p => p.id === currentUser.uid)?.name || 'Unknown',
                     senderId: currentUser.uid,
@@ -279,9 +337,11 @@
         // --- Canvas Logic ---
         function resizeCanvas() {
             const container = canvas.parentElement;
-            canvas.width = container.clientWidth;
-            canvas.height = container.clientHeight;
-            drawCanvas(); // Redraw on resize
+            if(container) {
+                canvas.width = container.clientWidth;
+                canvas.height = container.clientHeight;
+                drawCanvas(); 
+            }
         }
         window.addEventListener('resize', resizeCanvas);
 
@@ -290,57 +350,42 @@
             ctx.lineCap = 'round';
             ctx.lineJoin = 'round';
 
-            // Draw strokes from DB
             strokes.forEach(stroke => {
                 drawSmoothStroke(stroke.points, stroke.color, stroke.width);
             });
 
-            // Draw current stroke being drawn locally
             if (currentPoints.length > 0) {
                 drawSmoothStroke(currentPoints, currentColor, currentLineWidth);
             }
         }
 
-        // New Smoothing Function
         function drawSmoothStroke(points, color, width) {
             if (points.length < 2) return;
-
             ctx.beginPath();
             ctx.strokeStyle = color;
             ctx.lineWidth = width;
-
             const w = canvas.width;
             const h = canvas.height;
-
-            // Move to first point
             ctx.moveTo(points[0].x * w, points[0].y * h);
-
-            // If only 2 points, draw a straight line
             if (points.length === 2) {
                 ctx.lineTo(points[1].x * w, points[1].y * h);
                 ctx.stroke();
                 return;
             }
-
-            // Loop for quadratic curves
             for (let i = 1; i < points.length - 2; i++) {
                 const xc = (points[i].x * w + points[i + 1].x * w) / 2;
                 const yc = (points[i].y * h + points[i + 1].y * h) / 2;
                 ctx.quadraticCurveTo(points[i].x * w, points[i].y * h, xc, yc);
             }
-
-            // Curve through the last two points
             ctx.quadraticCurveTo(
                 points[points.length - 2].x * w,
                 points[points.length - 2].y * h,
                 points[points.length - 1].x * w,
                 points[points.length - 1].y * h
             );
-
             ctx.stroke();
         }
 
-        // Canvas Event Listeners
         function getCoords(e) {
             const rect = canvas.getBoundingClientRect();
             const clientX = e.touches ? e.touches[0].clientX : e.clientX;
@@ -372,16 +417,10 @@
             if (!isDrawing || !isDrawer) return;
             isDrawing = false;
             if (currentPoints.length > 1) {
-                const newStroke = {
-                    color: currentColor,
-                    width: currentLineWidth,
-                    points: currentPoints
-                };
-                // Optimistic update
+                const newStroke = { color: currentColor, width: currentLineWidth, points: currentPoints };
                 strokes.push(newStroke);
                 drawCanvas();
-                
-                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoomCode), {
                     strokes: arrayUnion(newStroke)
                 });
             }
@@ -398,7 +437,7 @@
 
         window.clearCanvas = async () => {
             if (!isDrawer) return;
-            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), { strokes: [] });
+            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'rooms', currentRoomCode), { strokes: [] });
         };
 
         window.setTool = (color, width) => {
@@ -424,7 +463,7 @@
                 maxIcon.setAttribute('data-lucide', 'maximize-2');
             }
             lucide.createIcons();
-            setTimeout(resizeCanvas, 50); // Resize after DOM update
+            setTimeout(resizeCanvas, 50);
         };
 
         // --- UI Rendering ---
@@ -435,9 +474,12 @@
             // Lobby
             if (lobbyList) {
                 lobbyList.innerHTML = players.map(p => `
-                    <div class="p-4 rounded-xl flex flex-col items-center gap-2 bg-white/10 border border-white/20">
-                        <div class="w-12 h-12 rounded-full flex items-center justify-center text-xl font-bold bg-gradient-to-br from-pink-500 to-purple-500 text-white">
-                            ${p.name.charAt(0)}
+                    <div class="p-4 rounded-xl flex flex-col items-center gap-2 bg-white/10 border border-white/20 animate-in fade-in zoom-in duration-300">
+                        <div class="relative">
+                            <div class="w-12 h-12 rounded-full flex items-center justify-center text-xl font-bold bg-gradient-to-br from-pink-500 to-purple-500 text-white shadow-lg">
+                                ${p.name.charAt(0)}
+                            </div>
+                            <span class="absolute bottom-0 right-0 w-3 h-3 bg-green-500 border-2 border-white rounded-full"></span>
                         </div>
                         <span class="font-medium truncate w-full text-center text-white">${p.name}</span>
                         <span class="text-xs text-white/60">${p.score} نقطة</span>
@@ -449,9 +491,12 @@
             // Game Sidebar
             if (gameList) {
                 gameList.innerHTML = players.map(p => `
-                    <div class="flex items-center gap-2 p-2 rounded-lg ${p.score === Math.max(...players.map(pl=>pl.score)) && p.score > 0 ? 'bg-yellow-500/20' : ''} ${p.id === roomData.drawerId ? 'border border-pink-500' : ''}">
-                        <div class="font-bold text-pink-500">${p.score}</div>
-                        <div class="flex-1 truncate text-white">${p.name} ${p.id === roomData.drawerId ? '✏️' : ''}</div>
+                    <div class="flex items-center gap-2 p-2 rounded-lg transition-all ${p.score === Math.max(...players.map(pl=>pl.score)) && p.score > 0 ? 'bg-yellow-500/20' : ''} ${p.id === roomData?.drawerId ? 'border border-pink-500' : ''}">
+                        <div class="font-bold text-pink-500 w-6 text-center">${p.score}</div>
+                        <div class="w-8 h-8 rounded-full flex items-center justify-center bg-white/10 text-xs font-bold shrink-0">
+                            ${p.name.charAt(0)}
+                        </div>
+                        <div class="flex-1 truncate text-white text-sm">${p.name} ${p.id === roomData?.drawerId ? '🖌️' : ''}</div>
                     </div>
                 `).join('');
             }
@@ -460,7 +505,7 @@
         function renderMessages() {
             const container = document.getElementById('chat-messages');
             container.innerHTML = messages.map(msg => `
-                <div class="p-2 rounded-lg text-sm mb-2 ${msg.isSystem ? 'bg-green-500/20 text-green-400 font-bold text-center' : (msg.isDrawer ? 'bg-yellow-500/10 border border-yellow-500/30 text-yellow-200' : 'bg-white/10 text-white')}">
+                <div class="p-2 rounded-lg text-sm mb-2 animate-in fade-in slide-in-from-right-2 ${msg.isSystem ? 'bg-green-500/20 text-green-400 font-bold text-center' : (msg.isDrawer ? 'bg-yellow-500/10 border border-yellow-500/30 text-yellow-200' : 'bg-white/10 text-white')}">
                     ${!msg.isSystem ? `<span class="font-bold opacity-70 block text-xs mb-1">${msg.sender}</span>` : ''}
                     <span class="break-words">${msg.text}</span>
                 </div>
@@ -475,7 +520,8 @@
             const chatInput = document.getElementById('chat-input');
             const sendBtn = document.getElementById('send-btn');
 
-            // Handle Finished State
+            if (!roomData) return; // Guard clause
+
             if (roomData.status === 'finished') {
                 overlay.classList.remove('hidden');
                 document.getElementById('result-word').innerText = roomData.currentWord;
@@ -483,9 +529,8 @@
                 overlay.classList.add('hidden');
             }
 
-            // Word Display
             if (isDrawer) {
-                wordDisplay.innerHTML = `<span class="text-green-400">${roomData.currentWord}</span>`;
+                wordDisplay.innerHTML = `<span class="text-green-400 bg-green-500/10 px-3 py-1 rounded-lg">${roomData.currentWord}</span>`;
                 toolbar.classList.remove('hidden');
                 chatInput.disabled = true;
                 chatInput.placeholder = "الرسام لا يمكنه التخمين";
@@ -499,12 +544,10 @@
                 sendBtn.disabled = false;
             }
 
-            // Drawer Name
             const drawer = players.find(p => p.id === roomData.drawerId);
-            document.getElementById('drawer-name').innerText = `الرسام: ${drawer ? drawer.name : '...'}`;
+            document.getElementById('drawer-name').innerText = drawer ? `${drawer.name}` : '...';
         }
 
-        // --- Theme Toggle ---
         window.toggleTheme = () => {
             const body = document.body;
             body.classList.toggle('light-mode');
@@ -517,7 +560,6 @@
             lucide.createIcons();
         }
 
-        // Init Icons
         window.onload = () => {
              lucide.createIcons();
              setInterval(() => {
@@ -550,7 +592,7 @@
             background-color: var(--bg-color);
             color: var(--text-color);
             transition: background-color 0.3s, color 0.3s;
-            overflow: hidden; /* Prevent scrolling on mobile while drawing */
+            overflow: hidden; 
         }
 
         .glass-panel {
@@ -565,6 +607,9 @@
             background: rgba(0, 0, 0, 0.2);
             border: 1px solid rgba(255, 255, 255, 0.1);
             color: inherit;
+        }
+        .glass-input:focus {
+            border-color: #ec4899;
         }
         .light-mode .glass-input {
             background: rgba(255, 255, 255, 0.5);
@@ -606,14 +651,14 @@
     <div class="ambient-orb bg-blue-600 bottom-0 right-0"></div>
 
     <!-- Header -->
-    <header class="flex justify-between items-center p-4 z-20">
+    <header class="flex justify-between items-center p-4 z-20 shrink-0">
         <div class="flex items-center gap-4">
             <div class="flex items-center gap-2 glass-panel px-4 py-2 rounded-full">
                 <i data-lucide="palette" class="text-pink-500"></i>
-                <h1 class="text-xl font-bold bg-gradient-to-r from-pink-500 to-violet-500 bg-clip-text text-transparent">Gartic Clone</h1>
+                <h1 class="text-xl font-bold bg-gradient-to-r from-pink-500 to-violet-500 bg-clip-text text-transparent hidden sm:block">Gartic Clone</h1>
+                <span id="room-display" class="text-sm font-bold bg-white/10 px-2 py-1 rounded ml-2 hidden"></span>
             </div>
             
-            <!-- Instagram Link -->
             <a href="https://instagram.com/c4man" target="_blank" class="glass-panel px-3 py-2 rounded-full hover:scale-105 transition flex items-center gap-2" title="Developer Instagram">
                <i data-lucide="instagram" class="w-5 h-5 text-pink-500"></i>
                <span class="c4man-link text-sm hidden sm:inline">c4man</span>
@@ -626,8 +671,7 @@
     </header>
 
     <!-- Main Content -->
-    <!-- Removed max-w-6xl for wider canvas -->
-    <main class="flex-1 relative overflow-hidden container mx-auto px-4 h-full flex flex-col w-full">
+    <main class="flex-1 relative overflow-hidden container mx-auto px-4 h-full flex flex-col w-full pb-4">
         
         <!-- Loading Screen -->
         <div id="loading-screen" class="absolute inset-0 flex items-center justify-center bg-slate-900 z-50">
@@ -641,13 +685,25 @@
                     <i data-lucide="user" class="w-12 h-12 text-white"></i>
                 </div>
                 <h2 class="text-3xl font-bold mb-2">مرحباً بك!</h2>
-                <p class="mb-8 opacity-70">أدخل اسمك للبدء في اللعب والرسم</p>
+                <p class="mb-6 opacity-70">أدخل اسمك ورقم الغرفة للبدء</p>
                 
-                <input type="text" id="player-name" placeholder="اسمك المستعار..." 
-                    class="w-full p-4 rounded-xl mb-4 glass-input outline-none focus:ring-2 focus:ring-pink-500 transition text-center text-lg"
-                    onkeydown="if(event.key === 'Enter') joinGame()">
+                <div class="space-y-4">
+                    <div class="relative">
+                        <i data-lucide="user" class="absolute right-4 top-4 text-white/50 w-5 h-5"></i>
+                        <input type="text" id="player-name" placeholder="اسمك المستعار..." 
+                            class="w-full p-4 pr-12 rounded-xl glass-input outline-none transition"
+                            onkeydown="if(event.key === 'Enter') joinGame()">
+                    </div>
+
+                    <div class="relative">
+                        <i data-lucide="key-round" class="absolute right-4 top-4 text-white/50 w-5 h-5"></i>
+                        <input type="number" id="room-code" placeholder="رقم الغرفة (مثال: 1010)" 
+                            class="w-full p-4 pr-12 rounded-xl glass-input outline-none transition"
+                            onkeydown="if(event.key === 'Enter') joinGame()">
+                    </div>
+                </div>
                 
-                <button onclick="joinGame()" class="w-full py-4 bg-gradient-to-r from-pink-500 to-violet-600 rounded-xl font-bold text-white text-lg hover:opacity-90 transition">
+                <button onclick="joinGame()" class="w-full py-4 mt-6 bg-gradient-to-r from-pink-500 to-violet-600 rounded-xl font-bold text-white text-lg hover:opacity-90 transition shadow-lg shadow-pink-500/20">
                     دخول الغرفة
                 </button>
             </div>
@@ -659,25 +715,26 @@
                 <div class="flex justify-between items-center mb-6">
                     <h2 class="text-2xl font-bold flex items-center gap-2">
                         <span class="w-3 h-3 bg-green-500 rounded-full animate-pulse"></span>
-                        غرفة الانتظار <span id="lobby-count"></span>
+                        المتواجدون <span id="lobby-count" class="opacity-70 text-lg"></span>
                     </h2>
-                    <button onclick="startGame()" class="px-6 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg font-bold transition flex items-center gap-2">
+                    <button onclick="startGame()" class="px-6 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg font-bold transition flex items-center gap-2 shadow-lg shadow-green-500/20">
                         <i data-lucide="play" size="18"></i> ابدأ اللعبة
                     </button>
                 </div>
                 <div id="lobby-players" class="flex-1 overflow-y-auto grid grid-cols-2 md:grid-cols-3 gap-4 p-2">
                     <!-- Players injected here -->
                 </div>
+                <p class="text-center mt-4 opacity-50 text-sm">انتظر انضمام باقي اللاعبين...</p>
             </div>
         </div>
 
         <!-- Game View -->
-        <div id="game-view" class="hidden h-full flex flex-col md:flex-row gap-4 pb-4">
+        <div id="game-view" class="hidden h-full flex flex-col md:flex-row gap-4">
             <!-- Sidebar -->
-            <div id="players-sidebar" class="w-full md:w-56 flex flex-col gap-4 max-h-[150px] md:max-h-full transition-all duration-300">
+            <div id="players-sidebar" class="w-full md:w-56 flex flex-col gap-4 max-h-[120px] md:max-h-full transition-all duration-300 shrink-0">
                 <div class="glass-panel p-4 rounded-2xl flex-1 overflow-hidden flex flex-col">
-                    <h3 class="font-bold mb-3 border-b border-white/10 pb-2">اللاعبين</h3>
-                    <div id="game-players" class="overflow-y-auto space-y-2 pr-1 h-full">
+                    <h3 class="font-bold mb-3 border-b border-white/10 pb-2 text-sm uppercase tracking-wider opacity-70">قائمة النقاط</h3>
+                    <div id="game-players" class="overflow-y-auto space-y-2 pr-1 h-full custom-scrollbar">
                         <!-- Game players list -->
                     </div>
                 </div>
@@ -686,11 +743,11 @@
             <!-- Canvas Area -->
             <div class="flex-1 flex flex-col gap-4 h-full min-h-0">
                 <!-- Top Info -->
-                <div class="glass-panel p-3 rounded-xl flex items-center gap-4">
-                    <div id="timer-display" class="text-xl font-bold text-pink-500 w-12">0s</div>
-                    <div id="word-display" class="text-2xl font-black text-center tracking-wider flex-1">...</div>
+                <div class="glass-panel p-3 rounded-xl flex items-center gap-4 shrink-0">
+                    <div id="timer-display" class="text-xl font-bold text-pink-500 w-12 text-center bg-white/5 rounded p-1">0s</div>
+                    <div id="word-display" class="text-2xl font-black text-center tracking-wider flex-1 truncate">...</div>
                     <div class="flex items-center gap-2">
-                        <div id="drawer-name" class="text-sm opacity-70 w-32 text-left truncate hidden sm:block">...</div>
+                        <div id="drawer-name" class="text-sm opacity-70 w-24 text-left truncate hidden sm:block bg-white/5 px-2 py-1 rounded">...</div>
                         <button onclick="toggleMaximize()" class="p-2 hover:bg-white/10 rounded-lg transition" title="تكبير/تصغير">
                             <i id="maximize-icon" data-lucide="maximize-2"></i>
                         </button>
@@ -698,27 +755,27 @@
                 </div>
 
                 <!-- Canvas -->
-                <div class="flex-1 glass-panel rounded-2xl relative overflow-hidden bg-white cursor-crosshair touch-none">
+                <div class="flex-1 glass-panel rounded-2xl relative overflow-hidden bg-white cursor-crosshair touch-none shadow-2xl">
                     <canvas id="drawing-canvas" class="absolute inset-0 w-full h-full block"></canvas>
                     
                     <!-- Result Overlay -->
-                    <div id="game-overlay" class="hidden absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-20">
-                        <div class="bg-white text-slate-900 p-8 rounded-3xl text-center shadow-2xl animate-bounce">
+                    <div id="game-overlay" class="hidden absolute inset-0 bg-black/70 backdrop-blur-md flex items-center justify-center z-20">
+                        <div class="bg-white text-slate-900 p-8 rounded-3xl text-center shadow-2xl animate-bounce max-w-sm mx-4">
                             <h2 class="text-2xl font-bold mb-2">انتهت الجولة!</h2>
-                            <p class="text-lg">الكلمة كانت:</p>
+                            <p class="text-lg opacity-70">الكلمة كانت:</p>
                             <p id="result-word" class="text-4xl font-black text-pink-600 mt-2">...</p>
                         </div>
                     </div>
                 </div>
 
                 <!-- Drawing Tools (Drawer Only) -->
-                <div id="drawing-tools" class="glass-panel p-2 rounded-xl flex items-center gap-2 justify-center flex-wrap hidden">
+                <div id="drawing-tools" class="glass-panel p-2 rounded-xl flex items-center gap-2 justify-center flex-wrap hidden shrink-0">
                     <div class="flex gap-1">
-                        <button class="w-8 h-8 rounded-full border-2 border-transparent hover:scale-110 transition bg-black" onclick="setTool('#000000', null)"></button>
-                        <button class="w-8 h-8 rounded-full border-2 border-transparent hover:scale-110 transition bg-red-500" onclick="setTool('#ef4444', null)"></button>
-                        <button class="w-8 h-8 rounded-full border-2 border-transparent hover:scale-110 transition bg-green-500" onclick="setTool('#22c55e', null)"></button>
-                        <button class="w-8 h-8 rounded-full border-2 border-transparent hover:scale-110 transition bg-blue-500" onclick="setTool('#3b82f6', null)"></button>
-                        <button class="w-8 h-8 rounded-full border-2 border-transparent hover:scale-110 transition bg-yellow-500" onclick="setTool('#eab308', null)"></button>
+                        <button class="w-8 h-8 rounded-full border-2 border-white/20 hover:scale-110 transition bg-black" onclick="setTool('#000000', null)"></button>
+                        <button class="w-8 h-8 rounded-full border-2 border-white/20 hover:scale-110 transition bg-red-500" onclick="setTool('#ef4444', null)"></button>
+                        <button class="w-8 h-8 rounded-full border-2 border-white/20 hover:scale-110 transition bg-green-500" onclick="setTool('#22c55e', null)"></button>
+                        <button class="w-8 h-8 rounded-full border-2 border-white/20 hover:scale-110 transition bg-blue-500" onclick="setTool('#3b82f6', null)"></button>
+                        <button class="w-8 h-8 rounded-full border-2 border-white/20 hover:scale-110 transition bg-yellow-500" onclick="setTool('#eab308', null)"></button>
                     </div>
                     <div class="w-px h-6 bg-white/20 mx-2"></div>
                     <div class="flex items-center gap-2">
@@ -738,12 +795,15 @@
 
             <!-- Chat -->
             <div id="chat-sidebar" class="w-full md:w-64 glass-panel rounded-2xl flex flex-col h-48 md:h-full overflow-hidden shrink-0 transition-all duration-300">
-                <div id="chat-messages" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
+                <div class="p-3 border-b border-white/10 font-bold text-sm flex items-center gap-2">
+                    <i data-lucide="message-circle" class="w-4 h-4"></i> الدردشة
+                </div>
+                <div id="chat-messages" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2 custom-scrollbar">
                     <!-- Messages injected here -->
                 </div>
-                <form onsubmit="sendMessage(event)" class="p-3 border-t border-white/10 flex gap-2">
-                    <input type="text" id="chat-input" placeholder="خمن الكلمة..." class="flex-1 glass-input rounded-lg px-3 py-2 text-sm outline-none">
-                    <button type="submit" id="send-btn" class="p-2 bg-pink-500 rounded-lg text-white hover:opacity-90">
+                <form onsubmit="sendMessage(event)" class="p-3 border-t border-white/10 flex gap-2 bg-black/20">
+                    <input type="text" id="chat-input" placeholder="خمن الكلمة..." class="flex-1 glass-input rounded-lg px-3 py-2 text-sm outline-none placeholder-white/30">
+                    <button type="submit" id="send-btn" class="p-2 bg-pink-500 rounded-lg text-white hover:opacity-90 shadow-lg shadow-pink-500/20">
                         <i data-lucide="send" size="16"></i>
                     </button>
                 </form>
