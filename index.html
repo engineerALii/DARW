@@ -1,0 +1,693 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>لعبة التخمين والرسم</title>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <!-- Google Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;900&display=swap" rel="stylesheet">
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
+        import { getFirestore, collection, doc, setDoc, onSnapshot, updateDoc, arrayUnion, increment, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore.js";
+
+        // --- Firebase Configuration ---
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            apiKey: "AIzaSyD6MRZ7d7J1333erYoBrUGqocJNdGNjB7w",
+            authDomain: "neew-aec2b.firebaseapp.com",
+            databaseURL: "https://neew-aec2b-default-rtdb.firebaseio.com",
+            projectId: "neew-aec2b",
+            storageBucket: "neew-aec2b.firebasestorage.app",
+            messagingSenderId: "70112873200",
+            appId: "1:70112873200:web:b8ef2b3863be6f1bf39035"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-gartic-app-v2';
+
+        // --- Global State ---
+        let currentUser = null;
+        let roomData = null;
+        let players = [];
+        let messages = [];
+        let strokes = []; // {color, width, points: [{x, y}]}
+        let isDrawing = false;
+        let currentPoints = [];
+        let currentColor = '#000000';
+        let currentLineWidth = 5;
+        let timeLeft = 0;
+        let timerInterval = null;
+        let isDrawer = false;
+
+        // --- DOM Elements ---
+        const views = {
+            login: document.getElementById('login-view'),
+            lobby: document.getElementById('lobby-view'),
+            game: document.getElementById('game-view')
+        };
+        const canvas = document.getElementById('drawing-canvas');
+        const ctx = canvas.getContext('2d');
+
+        // --- Word List ---
+        const WORD_LIST = [
+            "قطة", "كلب", "سيارة", "شجرة", "منزل", "شمس", "قمر", "نجمة", "سحابة", "مطر",
+            "بحر", "قارب", "طائرة", "دراجة", "كرة", "تلفاز", "حاسوب", "هاتف", "ساعة", "نظارة",
+            "كرسي", "طاولة", "سرير", "مصباح", "باب", "شباك", "قلم", "كتاب", "حقيبة", "حذاء",
+            "قميص", "بنطال", "قبعة", "جورب", "ملعقة", "شوكة", "سكين", "طبق", "كوب", "زجاجة",
+            "تفاحة", "موزة", "برتقالة", "عنب", "بطيخ", "فراولة", "ليمون", "جزرة", "خيار", "طماطم",
+            "بطاطس", "بصل", "ثوم", "خبز", "بيض", "جبن", "لحم", "دجاج", "سمك", "آيس كريم",
+            "كعكة", "شوكولاتة", "قهوة", "شاي", "عصير", "ماء", "حليب", "عسل", "سكر", "ملح",
+            "فلفل", "زهرة", "وردة", "عشب", "نخلة", "صبار", "جبل", "وادي", "نهر", "بحيرة",
+            "صحراء", "غابة", "حديقة", "مدرسة", "مستشفى", "مسجد", "سوق", "مطعم", "فندق", "مطار",
+            "محطة", "جسر", "نفق", "طريق", "اشارة مرور", "شرطي", "طبيب", "معلم", "مهندس", "طباخ",
+            "خياط", "حلاق", "نجار", "حداد", "مزارع", "صياد", "جندي", "طيار", "سائق", "رجل اطفاء",
+            "اسد", "نمر", "فيل", "زرافة", "قرد", "دب", "ذئب", "ثعلب", "ارنب", "سلحفاة",
+            "تمساح", "ثعبان", "نسر", "صقر", "بومة", "عصفور", "حمامة", "بطة", "ديك", "دجاجة",
+            "بقرة", "خروف", "ماعز", "حصان", "حمار", "جمل", "غزال", "كنغر", "بطريق", "دولفين",
+            "حوت", "قرش", "اخطبوط", "قنديل البحر", "نحلة", "نملة", "فراشة", "عنكبوت", "عقرب", "ذبابة",
+            "بعوضة", "صرصور", "خنفساء", "دودة", "حلزون", "ضفدع", "سحلية", "ديناصور", "تنين", "وحش",
+            "شبح", "فضاء", "كوكب", "مجرة", "صاروخ", "رائد فضاء", "طبق طائر", "روبوت", "الة زمن", "كنز",
+            "خريطة", "بوصلة", "مظلة", "مقص", "مفتاح", "قفل", "جرس", "علم", "بالون", "طائرة ورقية",
+            "ارجوحة", "زحلوقة", "لعبة", "دمية", "رمل", "ثلج", "رجل ثلج", "نار", "دخان", "رماد",
+            "بركان", "زلزال", "اعصار", "فيضان", "جفاف", "خريف", "شتاء", "ربيع", "صيف", "الوان",
+            "رسم", "فرشاة", "لوحة", "متحف", "مسرح", "سينما", "فيلم", "اغنية", "موسيقى", "رقص"
+        ];
+
+        // --- Initialization ---
+        async function initAuth() {
+            if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                await signInWithCustomToken(auth, __initial_auth_token);
+            } else {
+                await signInAnonymously(auth);
+            }
+        }
+
+        initAuth();
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUser = user;
+                document.getElementById('loading-screen').classList.add('hidden');
+                switchView('login');
+                setupFirestoreListeners();
+            }
+        });
+
+        // --- View Management ---
+        function switchView(viewName) {
+            Object.values(views).forEach(el => el.classList.add('hidden'));
+            views[viewName].classList.remove('hidden');
+            if (viewName === 'game') {
+                resizeCanvas();
+            }
+        }
+
+        // --- Firestore Listeners ---
+        function setupFirestoreListeners() {
+            // Room Data - FIX: Added 'main' to make path even (6 segments)
+            onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), (snap) => {
+                if (snap.exists()) {
+                    roomData = snap.data();
+                    strokes = roomData.strokes || [];
+                    isDrawer = roomData.drawerId === currentUser.uid;
+                    
+                    updateGameUI();
+                    drawCanvas();
+                    
+                    // Handle Timer
+                    if (roomData.roundEndTime) {
+                        const now = Date.now();
+                        const end = roomData.roundEndTime.toMillis ? roomData.roundEndTime.toMillis() : roomData.roundEndTime;
+                        const left = Math.max(0, Math.ceil((end - now) / 1000));
+                        timeLeft = left;
+                        document.getElementById('timer-display').textContent = timeLeft + 's';
+                        
+                        // Check if I should end the round
+                        if (timeLeft === 0 && roomData.status === 'playing' && isDrawer) {
+                            endRound();
+                        }
+                    }
+
+                    // Auto switch to game if playing
+                    if ((roomData.status === 'playing' || roomData.status === 'finished') && !views.game.classList.contains('hidden') === false) {
+                        if (players.find(p => p.id === currentUser.uid)) { // Only if joined
+                            switchView('game');
+                        }
+                    }
+                    // Back to lobby logic
+                    if (roomData.status === 'lobby' && !views.lobby.classList.contains('hidden') === false) {
+                         if (players.find(p => p.id === currentUser.uid)) {
+                            switchView('lobby');
+                         }
+                    }
+                } else {
+                    // Create room if not exists - FIX: Added 'main' to path
+                    setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
+                        status: 'lobby',
+                        currentWord: '',
+                        drawerId: null,
+                        roundEndTime: null,
+                        strokes: [],
+                        usedWords: []
+                    });
+                }
+            });
+
+            // Players
+            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'game_room_players'), (snap) => {
+                players = [];
+                snap.forEach(d => players.push({ id: d.id, ...d.data() }));
+                players.sort((a, b) => b.score - a.score);
+                renderPlayers();
+            });
+
+            // Messages
+            onSnapshot(collection(db, 'artifacts', appId, 'public', 'data', 'game_room_messages'), (snap) => {
+                messages = [];
+                snap.forEach(d => messages.push({ id: d.id, ...d.data() }));
+                messages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                renderMessages();
+            });
+        }
+
+        // --- Game Logic ---
+        window.joinGame = async () => {
+            const nameInput = document.getElementById('player-name');
+            const name = nameInput.value.trim();
+            if (!name) return alert('الرجاء إدخال اسم!');
+
+            await setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_players', currentUser.uid), {
+                name: name,
+                score: 0,
+                avatar: Math.floor(Math.random() * 5)
+            });
+
+            switchView('lobby');
+        };
+
+        window.startGame = async () => {
+            if (players.length < 2) {
+                // alert('نحتاج لاعبين اثنين على الأقل!');
+                // For testing allow 1
+            }
+
+            const randomPlayer = players[Math.floor(Math.random() * players.length)];
+            
+            let availableWords = WORD_LIST.filter(w => !roomData.usedWords?.includes(w));
+            if (availableWords.length === 0) {
+                availableWords = WORD_LIST;
+                // FIX: Added 'main' to path
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), { usedWords: [] });
+            }
+            const newWord = availableWords[Math.floor(Math.random() * availableWords.length)];
+
+            // FIX: Added 'main' to path
+            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
+                status: 'playing',
+                drawerId: randomPlayer.id,
+                currentWord: newWord,
+                roundEndTime: Date.now() + 60000,
+                strokes: [],
+                usedWords: arrayUnion(newWord)
+            });
+        };
+
+        async function endRound() {
+            // FIX: Added 'main' to path
+            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
+                status: 'finished',
+                roundEndTime: Date.now() + 5000
+            });
+            setTimeout(async () => {
+                // FIX: Added 'main' to path
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
+                    status: 'lobby',
+                    currentWord: '',
+                    drawerId: null
+                });
+            }, 5000);
+        }
+
+        // --- Chat & Guessing ---
+        window.sendMessage = async (e) => {
+            e.preventDefault();
+            const input = document.getElementById('chat-input');
+            const text = input.value.trim();
+            if (!text) return;
+
+            const isCorrect = roomData.status === 'playing' && !isDrawer && text === roomData.currentWord;
+
+            if (isCorrect) {
+                // Score Logic
+                const points = 10 + Math.floor(timeLeft / 5);
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_players', currentUser.uid), {
+                    score: increment(points)
+                });
+                if (roomData.drawerId) {
+                    await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_players', roomData.drawerId), {
+                        score: increment(5)
+                    });
+                }
+                
+                await setDoc(doc(collection(db, 'artifacts', appId, 'public', 'data', 'game_room_messages')), {
+                    text: `🎉 ${players.find(p => p.id === currentUser.uid)?.name} خمن الكلمة الصحيحة!`,
+                    sender: 'System',
+                    isSystem: true,
+                    timestamp: Date.now()
+                });
+                
+                endRound();
+            } else {
+                await setDoc(doc(collection(db, 'artifacts', appId, 'public', 'data', 'game_room_messages')), {
+                    text: text,
+                    sender: players.find(p => p.id === currentUser.uid)?.name || 'Unknown',
+                    senderId: currentUser.uid,
+                    isDrawer: isDrawer,
+                    timestamp: Date.now()
+                });
+            }
+            input.value = '';
+        };
+
+        // --- Canvas Logic ---
+        function resizeCanvas() {
+            const container = canvas.parentElement;
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+            drawCanvas(); // Redraw on resize
+        }
+        window.addEventListener('resize', resizeCanvas);
+
+        function drawCanvas() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            // Draw strokes from DB
+            strokes.forEach(stroke => {
+                drawStroke(stroke);
+            });
+
+            // Draw current stroke being drawn locally
+            if (currentPoints.length > 1) {
+                ctx.beginPath();
+                ctx.strokeStyle = currentColor;
+                ctx.lineWidth = currentLineWidth;
+                ctx.moveTo(currentPoints[0].x * canvas.width, currentPoints[0].y * canvas.height);
+                for (let i = 1; i < currentPoints.length; i++) {
+                    ctx.lineTo(currentPoints[i].x * canvas.width, currentPoints[i].y * canvas.height);
+                }
+                ctx.stroke();
+            }
+        }
+
+        function drawStroke(stroke) {
+            if (stroke.points.length < 2) return;
+            ctx.beginPath();
+            ctx.strokeStyle = stroke.color;
+            ctx.lineWidth = stroke.width;
+            ctx.moveTo(stroke.points[0].x * canvas.width, stroke.points[0].y * canvas.height);
+            for (let i = 1; i < stroke.points.length; i++) {
+                ctx.lineTo(stroke.points[i].x * canvas.width, stroke.points[i].y * canvas.height);
+            }
+            ctx.stroke();
+        }
+
+        // Canvas Event Listeners
+        function getCoords(e) {
+            const rect = canvas.getBoundingClientRect();
+            const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+            const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+            return {
+                x: (clientX - rect.left) / rect.width,
+                y: (clientY - rect.top) / rect.height
+            };
+        }
+
+        function startDrawing(e) {
+            if (!isDrawer) return;
+            e.preventDefault();
+            isDrawing = true;
+            const coords = getCoords(e);
+            currentPoints = [coords];
+            drawCanvas();
+        }
+
+        function moveDrawing(e) {
+            if (!isDrawing || !isDrawer) return;
+            e.preventDefault();
+            const coords = getCoords(e);
+            currentPoints.push(coords);
+            drawCanvas();
+        }
+
+        async function stopDrawing() {
+            if (!isDrawing || !isDrawer) return;
+            isDrawing = false;
+            if (currentPoints.length > 1) {
+                const newStroke = {
+                    color: currentColor,
+                    width: currentLineWidth,
+                    points: currentPoints
+                };
+                // Optimistic update
+                strokes.push(newStroke);
+                drawCanvas();
+                
+                // FIX: Added 'main' to path
+                await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
+                    strokes: arrayUnion(newStroke)
+                });
+            }
+            currentPoints = [];
+        }
+
+        canvas.addEventListener('mousedown', startDrawing);
+        canvas.addEventListener('mousemove', moveDrawing);
+        canvas.addEventListener('mouseup', stopDrawing);
+        canvas.addEventListener('mouseleave', stopDrawing);
+        canvas.addEventListener('touchstart', startDrawing, {passive: false});
+        canvas.addEventListener('touchmove', moveDrawing, {passive: false});
+        canvas.addEventListener('touchend', stopDrawing);
+
+        window.clearCanvas = async () => {
+            if (!isDrawer) return;
+            // FIX: Added 'main' to path
+            await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), { strokes: [] });
+        };
+
+        window.setTool = (color, width) => {
+            if(color) currentColor = color;
+            if(width) currentLineWidth = width;
+        };
+
+        // --- UI Rendering ---
+        function renderPlayers() {
+            const lobbyList = document.getElementById('lobby-players');
+            const gameList = document.getElementById('game-players');
+            
+            // Lobby
+            if (lobbyList) {
+                lobbyList.innerHTML = players.map(p => `
+                    <div class="p-4 rounded-xl flex flex-col items-center gap-2 bg-white/10 border border-white/20">
+                        <div class="w-12 h-12 rounded-full flex items-center justify-center text-xl font-bold bg-gradient-to-br from-pink-500 to-purple-500 text-white">
+                            ${p.name.charAt(0)}
+                        </div>
+                        <span class="font-medium truncate w-full text-center text-white">${p.name}</span>
+                        <span class="text-xs text-white/60">${p.score} نقطة</span>
+                    </div>
+                `).join('');
+                document.getElementById('lobby-count').innerText = `(${players.length})`;
+            }
+
+            // Game Sidebar
+            if (gameList) {
+                gameList.innerHTML = players.map(p => `
+                    <div class="flex items-center gap-2 p-2 rounded-lg ${p.score === Math.max(...players.map(pl=>pl.score)) && p.score > 0 ? 'bg-yellow-500/20' : ''} ${p.id === roomData.drawerId ? 'border border-pink-500' : ''}">
+                        <div class="font-bold text-pink-500">${p.score}</div>
+                        <div class="flex-1 truncate text-white">${p.name} ${p.id === roomData.drawerId ? '✏️' : ''}</div>
+                    </div>
+                `).join('');
+            }
+        }
+
+        function renderMessages() {
+            const container = document.getElementById('chat-messages');
+            container.innerHTML = messages.map(msg => `
+                <div class="p-2 rounded-lg text-sm mb-2 ${msg.isSystem ? 'bg-green-500/20 text-green-400 font-bold text-center' : (msg.isDrawer ? 'bg-yellow-500/10 border border-yellow-500/30 text-yellow-200' : 'bg-white/10 text-white')}">
+                    ${!msg.isSystem ? `<span class="font-bold opacity-70 block text-xs mb-1">${msg.sender}</span>` : ''}
+                    <span class="break-words">${msg.text}</span>
+                </div>
+            `).join('');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        function updateGameUI() {
+            const overlay = document.getElementById('game-overlay');
+            const wordDisplay = document.getElementById('word-display');
+            const toolbar = document.getElementById('drawing-tools');
+            const chatInput = document.getElementById('chat-input');
+            const sendBtn = document.getElementById('send-btn');
+
+            // Handle Finished State
+            if (roomData.status === 'finished') {
+                overlay.classList.remove('hidden');
+                document.getElementById('result-word').innerText = roomData.currentWord;
+            } else {
+                overlay.classList.add('hidden');
+            }
+
+            // Word Display
+            if (isDrawer) {
+                wordDisplay.innerHTML = `<span class="text-green-400">${roomData.currentWord}</span>`;
+                toolbar.classList.remove('hidden');
+                chatInput.disabled = true;
+                chatInput.placeholder = "الرسام لا يمكنه التخمين";
+                sendBtn.disabled = true;
+            } else {
+                const hiddenWord = '_ '.repeat(roomData.currentWord.length);
+                wordDisplay.innerHTML = `<span class="text-gray-400 tracking-[0.5em]">${hiddenWord}</span>`;
+                toolbar.classList.add('hidden');
+                chatInput.disabled = false;
+                chatInput.placeholder = "خمن الكلمة...";
+                sendBtn.disabled = false;
+            }
+
+            // Drawer Name
+            const drawer = players.find(p => p.id === roomData.drawerId);
+            document.getElementById('drawer-name').innerText = `الرسام: ${drawer ? drawer.name : '...'}`;
+        }
+
+        // --- Theme Toggle ---
+        window.toggleTheme = () => {
+            const body = document.body;
+            body.classList.toggle('light-mode');
+            const btn = document.getElementById('theme-btn');
+            if (body.classList.contains('light-mode')) {
+                btn.innerHTML = '<i data-lucide="moon"></i>';
+            } else {
+                btn.innerHTML = '<i data-lucide="sun"></i>';
+            }
+            lucide.createIcons();
+        }
+
+        // Init Icons
+        window.onload = () => {
+             lucide.createIcons();
+             setInterval(() => {
+                if (roomData?.status === 'playing' && timeLeft > 0) {
+                     timeLeft--;
+                     document.getElementById('timer-display').textContent = timeLeft + 's';
+                }
+             }, 1000);
+        };
+
+    </script>
+
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --text-color: #ffffff;
+            --glass-bg: rgba(30, 41, 59, 0.7);
+            --glass-border: rgba(255, 255, 255, 0.1);
+        }
+
+        .light-mode {
+            --bg-color: #eff6ff;
+            --text-color: #1e293b;
+            --glass-bg: rgba(255, 255, 255, 0.7);
+            --glass-border: rgba(255, 255, 255, 0.5);
+        }
+
+        body {
+            font-family: 'Tajawal', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            transition: background-color 0.3s, color 0.3s;
+            overflow: hidden; /* Prevent scrolling on mobile while drawing */
+        }
+
+        .glass-panel {
+            background: var(--glass-bg);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--glass-border);
+            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.1);
+        }
+
+        .glass-input {
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: inherit;
+        }
+        .light-mode .glass-input {
+            background: rgba(255, 255, 255, 0.5);
+            border: 1px solid rgba(0, 0, 0, 0.1);
+        }
+
+        /* Ambient Background */
+        .ambient-orb {
+            position: absolute;
+            width: 500px;
+            height: 500px;
+            border-radius: 50%;
+            filter: blur(100px);
+            opacity: 0.3;
+            z-index: -1;
+            animation: float 10s infinite ease-in-out;
+        }
+        @keyframes float {
+            0%, 100% { transform: translate(0, 0); }
+            50% { transform: translate(20px, -20px); }
+        }
+    </style>
+</head>
+<body class="h-screen w-screen flex flex-col">
+
+    <!-- Ambient Background -->
+    <div class="ambient-orb bg-purple-600 top-0 left-0"></div>
+    <div class="ambient-orb bg-blue-600 bottom-0 right-0"></div>
+
+    <!-- Header -->
+    <header class="flex justify-between items-center p-4 z-20">
+        <div class="flex items-center gap-2 glass-panel px-4 py-2 rounded-full">
+            <i data-lucide="palette" class="text-pink-500"></i>
+            <h1 class="text-xl font-bold bg-gradient-to-r from-pink-500 to-violet-500 bg-clip-text text-transparent">Gartic Clone</h1>
+        </div>
+        <button id="theme-btn" onclick="toggleTheme()" class="p-2 rounded-full glass-panel hover:bg-white/10 transition">
+            <i data-lucide="sun"></i>
+        </button>
+    </header>
+
+    <!-- Main Content -->
+    <main class="flex-1 relative overflow-hidden container mx-auto p-4 max-w-6xl h-full flex flex-col">
+        
+        <!-- Loading Screen -->
+        <div id="loading-screen" class="absolute inset-0 flex items-center justify-center bg-slate-900 z-50">
+            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-pink-500"></div>
+        </div>
+
+        <!-- Login View -->
+        <div id="login-view" class="hidden h-full flex items-center justify-center">
+            <div class="glass-panel p-8 rounded-3xl w-full max-w-md text-center">
+                <div class="w-24 h-24 bg-gradient-to-tr from-pink-500 to-violet-500 rounded-full mx-auto mb-6 flex items-center justify-center shadow-lg shadow-pink-500/30">
+                    <i data-lucide="user" class="w-12 h-12 text-white"></i>
+                </div>
+                <h2 class="text-3xl font-bold mb-2">مرحباً بك!</h2>
+                <p class="mb-8 opacity-70">أدخل اسمك للبدء في اللعب والرسم</p>
+                
+                <input type="text" id="player-name" placeholder="اسمك المستعار..." 
+                    class="w-full p-4 rounded-xl mb-4 glass-input outline-none focus:ring-2 focus:ring-pink-500 transition text-center text-lg"
+                    onkeydown="if(event.key === 'Enter') joinGame()">
+                
+                <button onclick="joinGame()" class="w-full py-4 bg-gradient-to-r from-pink-500 to-violet-600 rounded-xl font-bold text-white text-lg hover:opacity-90 transition">
+                    دخول الغرفة
+                </button>
+            </div>
+        </div>
+
+        <!-- Lobby View -->
+        <div id="lobby-view" class="hidden h-full flex flex-col items-center justify-center">
+            <div class="glass-panel w-full max-w-2xl rounded-3xl p-6 flex flex-col h-[70vh]">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-2xl font-bold flex items-center gap-2">
+                        <span class="w-3 h-3 bg-green-500 rounded-full animate-pulse"></span>
+                        غرفة الانتظار <span id="lobby-count"></span>
+                    </h2>
+                    <button onclick="startGame()" class="px-6 py-2 bg-green-500 hover:bg-green-600 text-white rounded-lg font-bold transition flex items-center gap-2">
+                        <i data-lucide="play" size="18"></i> ابدأ اللعبة
+                    </button>
+                </div>
+                <div id="lobby-players" class="flex-1 overflow-y-auto grid grid-cols-2 md:grid-cols-3 gap-4 p-2">
+                    <!-- Players injected here -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Game View -->
+        <div id="game-view" class="hidden h-full flex flex-col md:flex-row gap-4 pb-4">
+            <!-- Sidebar -->
+            <div class="w-full md:w-64 flex flex-col gap-4 max-h-[150px] md:max-h-full">
+                <div class="glass-panel p-4 rounded-2xl flex-1 overflow-hidden flex flex-col">
+                    <h3 class="font-bold mb-3 border-b border-white/10 pb-2">اللاعبين</h3>
+                    <div id="game-players" class="overflow-y-auto space-y-2 pr-1 h-full">
+                        <!-- Game players list -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Canvas Area -->
+            <div class="flex-1 flex flex-col gap-4 h-full min-h-0">
+                <!-- Top Info -->
+                <div class="glass-panel p-3 rounded-xl flex items-center justify-between">
+                    <div id="timer-display" class="text-xl font-bold text-pink-500 w-12">0s</div>
+                    <div id="word-display" class="text-2xl font-black text-center tracking-wider flex-1">...</div>
+                    <div id="drawer-name" class="text-sm opacity-70 w-32 text-left truncate">...</div>
+                </div>
+
+                <!-- Canvas -->
+                <div class="flex-1 glass-panel rounded-2xl relative overflow-hidden bg-white cursor-crosshair touch-none">
+                    <canvas id="drawing-canvas" class="absolute inset-0 w-full h-full block"></canvas>
+                    
+                    <!-- Result Overlay -->
+                    <div id="game-overlay" class="hidden absolute inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-20">
+                        <div class="bg-white text-slate-900 p-8 rounded-3xl text-center shadow-2xl animate-bounce">
+                            <h2 class="text-2xl font-bold mb-2">انتهت الجولة!</h2>
+                            <p class="text-lg">الكلمة كانت:</p>
+                            <p id="result-word" class="text-4xl font-black text-pink-600 mt-2">...</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Drawing Tools (Drawer Only) -->
+                <div id="drawing-tools" class="glass-panel p-2 rounded-xl flex items-center gap-2 justify-center flex-wrap hidden">
+                    <div class="flex gap-1">
+                        <button class="w-8 h-8 rounded-full border-2 border-transparent hover:scale-110 transition bg-black" onclick="setTool('#000000', null)"></button>
+                        <button class="w-8 h-8 rounded-full border-2 border-transparent hover:scale-110 transition bg-red-500" onclick="setTool('#ef4444', null)"></button>
+                        <button class="w-8 h-8 rounded-full border-2 border-transparent hover:scale-110 transition bg-green-500" onclick="setTool('#22c55e', null)"></button>
+                        <button class="w-8 h-8 rounded-full border-2 border-transparent hover:scale-110 transition bg-blue-500" onclick="setTool('#3b82f6', null)"></button>
+                        <button class="w-8 h-8 rounded-full border-2 border-transparent hover:scale-110 transition bg-yellow-500" onclick="setTool('#eab308', null)"></button>
+                    </div>
+                    <div class="w-px h-6 bg-white/20 mx-2"></div>
+                    <div class="flex items-center gap-2">
+                        <button onclick="setTool(null, 2)" class="p-2 rounded hover:bg-white/10"><div class="w-1 h-1 bg-current rounded-full"></div></button>
+                        <button onclick="setTool(null, 5)" class="p-2 rounded hover:bg-white/10"><div class="w-2 h-2 bg-current rounded-full"></div></button>
+                        <button onclick="setTool(null, 10)" class="p-2 rounded hover:bg-white/10"><div class="w-3 h-3 bg-current rounded-full"></div></button>
+                    </div>
+                    <div class="w-px h-6 bg-white/20 mx-2"></div>
+                    <button onclick="clearCanvas()" class="p-2 text-red-500 hover:bg-red-500/10 rounded-lg transition" title="مسح">
+                        <i data-lucide="trash-2"></i>
+                    </button>
+                    <button onclick="setTool('#ffffff', null)" class="p-2 hover:bg-white/10 rounded-lg transition" title="ممحاة">
+                        <i data-lucide="eraser"></i>
+                    </button>
+                </div>
+            </div>
+
+            <!-- Chat -->
+            <div class="w-full md:w-72 glass-panel rounded-2xl flex flex-col h-48 md:h-full overflow-hidden shrink-0">
+                <div id="chat-messages" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
+                    <!-- Messages injected here -->
+                </div>
+                <form onsubmit="sendMessage(event)" class="p-3 border-t border-white/10 flex gap-2">
+                    <input type="text" id="chat-input" placeholder="خمن الكلمة..." class="flex-1 glass-input rounded-lg px-3 py-2 text-sm outline-none">
+                    <button type="submit" id="send-btn" class="p-2 bg-pink-500 rounded-lg text-white hover:opacity-90">
+                        <i data-lucide="send" size="16"></i>
+                    </button>
+                </form>
+            </div>
+        </div>
+    </main>
+</body>
+</html>
