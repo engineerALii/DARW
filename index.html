@@ -115,7 +115,7 @@
 
         // --- Firestore Listeners ---
         function setupFirestoreListeners() {
-            // Room Data - FIX: Added 'main' to make path even (6 segments)
+            // Room Data
             onSnapshot(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), (snap) => {
                 if (snap.exists()) {
                     roomData = snap.data();
@@ -152,7 +152,7 @@
                          }
                     }
                 } else {
-                    // Create room if not exists - FIX: Added 'main' to path
+                    // Create room if not exists
                     setDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
                         status: 'lobby',
                         currentWord: '',
@@ -207,12 +207,10 @@
             let availableWords = WORD_LIST.filter(w => !roomData.usedWords?.includes(w));
             if (availableWords.length === 0) {
                 availableWords = WORD_LIST;
-                // FIX: Added 'main' to path
                 await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), { usedWords: [] });
             }
             const newWord = availableWords[Math.floor(Math.random() * availableWords.length)];
 
-            // FIX: Added 'main' to path
             await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
                 status: 'playing',
                 drawerId: randomPlayer.id,
@@ -224,13 +222,11 @@
         };
 
         async function endRound() {
-            // FIX: Added 'main' to path
             await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
                 status: 'finished',
                 roundEndTime: Date.now() + 5000
             });
             setTimeout(async () => {
-                // FIX: Added 'main' to path
                 await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
                     status: 'lobby',
                     currentWord: '',
@@ -296,31 +292,51 @@
 
             // Draw strokes from DB
             strokes.forEach(stroke => {
-                drawStroke(stroke);
+                drawSmoothStroke(stroke.points, stroke.color, stroke.width);
             });
 
             // Draw current stroke being drawn locally
-            if (currentPoints.length > 1) {
-                ctx.beginPath();
-                ctx.strokeStyle = currentColor;
-                ctx.lineWidth = currentLineWidth;
-                ctx.moveTo(currentPoints[0].x * canvas.width, currentPoints[0].y * canvas.height);
-                for (let i = 1; i < currentPoints.length; i++) {
-                    ctx.lineTo(currentPoints[i].x * canvas.width, currentPoints[i].y * canvas.height);
-                }
-                ctx.stroke();
+            if (currentPoints.length > 0) {
+                drawSmoothStroke(currentPoints, currentColor, currentLineWidth);
             }
         }
 
-        function drawStroke(stroke) {
-            if (stroke.points.length < 2) return;
+        // New Smoothing Function
+        function drawSmoothStroke(points, color, width) {
+            if (points.length < 2) return;
+
             ctx.beginPath();
-            ctx.strokeStyle = stroke.color;
-            ctx.lineWidth = stroke.width;
-            ctx.moveTo(stroke.points[0].x * canvas.width, stroke.points[0].y * canvas.height);
-            for (let i = 1; i < stroke.points.length; i++) {
-                ctx.lineTo(stroke.points[i].x * canvas.width, stroke.points[i].y * canvas.height);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = width;
+
+            const w = canvas.width;
+            const h = canvas.height;
+
+            // Move to first point
+            ctx.moveTo(points[0].x * w, points[0].y * h);
+
+            // If only 2 points, draw a straight line
+            if (points.length === 2) {
+                ctx.lineTo(points[1].x * w, points[1].y * h);
+                ctx.stroke();
+                return;
             }
+
+            // Loop for quadratic curves
+            for (let i = 1; i < points.length - 2; i++) {
+                const xc = (points[i].x * w + points[i + 1].x * w) / 2;
+                const yc = (points[i].y * h + points[i + 1].y * h) / 2;
+                ctx.quadraticCurveTo(points[i].x * w, points[i].y * h, xc, yc);
+            }
+
+            // Curve through the last two points
+            ctx.quadraticCurveTo(
+                points[points.length - 2].x * w,
+                points[points.length - 2].y * h,
+                points[points.length - 1].x * w,
+                points[points.length - 1].y * h
+            );
+
             ctx.stroke();
         }
 
@@ -365,7 +381,6 @@
                 strokes.push(newStroke);
                 drawCanvas();
                 
-                // FIX: Added 'main' to path
                 await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), {
                     strokes: arrayUnion(newStroke)
                 });
@@ -383,7 +398,6 @@
 
         window.clearCanvas = async () => {
             if (!isDrawer) return;
-            // FIX: Added 'main' to path
             await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'game_room_v1', 'main'), { strokes: [] });
         };
 
@@ -551,6 +565,17 @@
             0%, 100% { transform: translate(0, 0); }
             50% { transform: translate(20px, -20px); }
         }
+        
+        .c4man-link {
+            text-decoration: none;
+            background: linear-gradient(45deg, #f09433 0%, #e6683c 25%, #dc2743 50%, #cc2366 75%, #bc1888 100%); 
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: bold;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
     </style>
 </head>
 <body class="h-screen w-screen flex flex-col">
@@ -561,17 +586,27 @@
 
     <!-- Header -->
     <header class="flex justify-between items-center p-4 z-20">
-        <div class="flex items-center gap-2 glass-panel px-4 py-2 rounded-full">
-            <i data-lucide="palette" class="text-pink-500"></i>
-            <h1 class="text-xl font-bold bg-gradient-to-r from-pink-500 to-violet-500 bg-clip-text text-transparent">Gartic Clone</h1>
+        <div class="flex items-center gap-4">
+            <div class="flex items-center gap-2 glass-panel px-4 py-2 rounded-full">
+                <i data-lucide="palette" class="text-pink-500"></i>
+                <h1 class="text-xl font-bold bg-gradient-to-r from-pink-500 to-violet-500 bg-clip-text text-transparent">Gartic Clone</h1>
+            </div>
+            
+            <!-- Instagram Link -->
+            <a href="https://instagram.com/c4man" target="_blank" class="glass-panel px-3 py-2 rounded-full hover:scale-105 transition flex items-center gap-2" title="Developer Instagram">
+               <i data-lucide="instagram" class="w-5 h-5 text-pink-500"></i>
+               <span class="c4man-link text-sm hidden sm:inline">c4man</span>
+            </a>
         </div>
+
         <button id="theme-btn" onclick="toggleTheme()" class="p-2 rounded-full glass-panel hover:bg-white/10 transition">
             <i data-lucide="sun"></i>
         </button>
     </header>
 
     <!-- Main Content -->
-    <main class="flex-1 relative overflow-hidden container mx-auto p-4 max-w-6xl h-full flex flex-col">
+    <!-- Removed max-w-6xl for wider canvas -->
+    <main class="flex-1 relative overflow-hidden container mx-auto px-4 h-full flex flex-col w-full">
         
         <!-- Loading Screen -->
         <div id="loading-screen" class="absolute inset-0 flex items-center justify-center bg-slate-900 z-50">
@@ -618,7 +653,7 @@
         <!-- Game View -->
         <div id="game-view" class="hidden h-full flex flex-col md:flex-row gap-4 pb-4">
             <!-- Sidebar -->
-            <div class="w-full md:w-64 flex flex-col gap-4 max-h-[150px] md:max-h-full">
+            <div class="w-full md:w-56 flex flex-col gap-4 max-h-[150px] md:max-h-full">
                 <div class="glass-panel p-4 rounded-2xl flex-1 overflow-hidden flex flex-col">
                     <h3 class="font-bold mb-3 border-b border-white/10 pb-2">اللاعبين</h3>
                     <div id="game-players" class="overflow-y-auto space-y-2 pr-1 h-full">
@@ -676,7 +711,7 @@
             </div>
 
             <!-- Chat -->
-            <div class="w-full md:w-72 glass-panel rounded-2xl flex flex-col h-48 md:h-full overflow-hidden shrink-0">
+            <div class="w-full md:w-64 glass-panel rounded-2xl flex flex-col h-48 md:h-full overflow-hidden shrink-0">
                 <div id="chat-messages" class="flex-1 overflow-y-auto p-3 flex flex-col gap-2">
                     <!-- Messages injected here -->
                 </div>
